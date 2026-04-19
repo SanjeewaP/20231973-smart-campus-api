@@ -2,6 +2,7 @@ package com.westminster.smartcampus;
 
 import org.glassfish.grizzly.http.server.HttpServer;
 import org.glassfish.jersey.grizzly2.httpserver.GrizzlyHttpServerFactory;
+import org.glassfish.jersey.server.ResourceConfig;
 
 import java.net.URI;
 import java.util.logging.Logger;
@@ -13,15 +14,16 @@ import java.util.logging.Logger;
 public class Main {
 
     private static final Logger LOGGER = Logger.getLogger(Main.class.getName());
-    private static final String BASE_URI = "http://localhost:8080/";
+    private static final String BASE_URI = "http://localhost:8080/api/v1/";
 
     public static void main(String[] args) {
+        ResourceConfig config = ResourceConfig.forApplication(new SmartCampusApplication());
         HttpServer server = GrizzlyHttpServerFactory.createHttpServer(
                 URI.create(BASE_URI),
-                new SmartCampusApplication()
+                config
         );
 
-        LOGGER.info("Smart Campus API started at " + BASE_URI + "api/v1");
+        LOGGER.info("Smart Campus API started at " + BASE_URI);
         LOGGER.info("Press Ctrl+C to stop the server.");
 
         // Keep the JVM alive until interrupted
