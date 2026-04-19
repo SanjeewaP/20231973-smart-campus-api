@@ -83,8 +83,8 @@ All errors return a JSON body — no raw stack traces are ever exposed.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/<your-username>/smart-campus-api.git
-cd smart-campus-api
+git clone https://github.com/SanjeewaP/20231973-smart-campus-api.git
+cd 20231973-smart-campus-api
 
 # 2. Build the project (produces a runnable fat JAR)
 mvn clean package
