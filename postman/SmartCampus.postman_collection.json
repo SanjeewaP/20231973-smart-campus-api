@@ -1,0 +1,305 @@
+{
+  "info": {
+    "name": "Smart Campus API — 5COSC022W Coursework Walkthrough",
+    "description": "Ordered Postman walkthrough that demonstrates every requirement in the coursework specification. Run each folder top-to-bottom during the video demo. Base URL is driven by the `baseUrl` collection variable (defaults to http://localhost:8080/api/v1).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080/api/v1",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Part 1 — Setup & Discovery (10 marks)",
+      "item": [
+        {
+          "name": "1.2  GET /  — Discovery / HATEOAS root",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}",
+              "host": ["{{baseUrl}}"]
+            },
+            "description": "Hits the @ApplicationPath(\"/api/v1\") root. Proves Part 1.1 (app boots under versioned path) and Part 1.2 (returns metadata + HATEOAS links)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Part 2 — Room Management (20 marks)",
+      "item": [
+        {
+          "name": "2.1a  GET /rooms  — list all rooms",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/rooms",
+              "host": ["{{baseUrl}}"],
+              "path": ["rooms"]
+            }
+          }
+        },
+        {
+          "name": "2.1b  POST /rooms  — create ENG-204 (expect 201)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"ENG-204\",\n  \"name\": \"Engineering Workshop\",\n  \"capacity\": 25\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/rooms",
+              "host": ["{{baseUrl}}"],
+              "path": ["rooms"]
+            }
+          }
+        },
+        {
+          "name": "2.1c  GET /rooms/ENG-204  — fetch single room",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/rooms/ENG-204",
+              "host": ["{{baseUrl}}"],
+              "path": ["rooms", "ENG-204"]
+            }
+          }
+        },
+        {
+          "name": "2.2a  DELETE /rooms/ENG-204  — empty room (expect 204)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/rooms/ENG-204",
+              "host": ["{{baseUrl}}"],
+              "path": ["rooms", "ENG-204"]
+            }
+          }
+        },
+        {
+          "name": "2.2b  DELETE /rooms/ENG-204 (again)  — idempotency (expect 404, end state unchanged)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/rooms/ENG-204",
+              "host": ["{{baseUrl}}"],
+              "path": ["rooms", "ENG-204"]
+            },
+            "description": "Second DELETE of the same room. Status differs (404 vs 204) but end state on the server is identical — the room is still gone. That's the definition of idempotency per RFC 9110."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Part 3 — Sensors & Filtering (20 marks)",
+      "item": [
+        {
+          "name": "3.1a  GET /sensors  — list all sensors",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sensors",
+              "host": ["{{baseUrl}}"],
+              "path": ["sensors"]
+            }
+          }
+        },
+        {
+          "name": "3.1b  POST /sensors (valid roomId)  — expect 201",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"TEMP-002\",\n  \"type\": \"Temperature\",\n  \"status\": \"ACTIVE\",\n  \"currentValue\": 21.0,\n  \"roomId\": \"LIB-301\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sensors",
+              "host": ["{{baseUrl}}"],
+              "path": ["sensors"]
+            }
+          }
+        },
+        {
+          "name": "3.1c  POST /sensors with text/plain  — @Consumes mismatch (expect 415)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "text/plain" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "not json at all"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sensors",
+              "host": ["{{baseUrl}}"],
+              "path": ["sensors"]
+            },
+            "description": "Shows how @Consumes(MediaType.APPLICATION_JSON) short-circuits dispatch. Jersey returns 415 BEFORE the resource method runs."
+          }
+        },
+        {
+          "name": "3.2  GET /sensors?type=CO2  — @QueryParam filter",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sensors?type=CO2",
+              "host": ["{{baseUrl}}"],
+              "path": ["sensors"],
+              "query": [
+                { "key": "type", "value": "CO2" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Part 4 — Sub-Resources & Readings (20 marks)",
+      "item": [
+        {
+          "name": "4.2a  GET /sensors/TEMP-001/readings  — empty history",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sensors/TEMP-001/readings",
+              "host": ["{{baseUrl}}"],
+              "path": ["sensors", "TEMP-001", "readings"]
+            },
+            "description": "Routed via the sub-resource locator SensorResource#getReadingsSubResource — the method has no @GET/@POST annotation, which is how JAX-RS recognises it as a locator."
+          }
+        },
+        {
+          "name": "4.2b  POST /sensors/TEMP-001/readings  — append reading (expect 201)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"value\": 23.7\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sensors/TEMP-001/readings",
+              "host": ["{{baseUrl}}"],
+              "path": ["sensors", "TEMP-001", "readings"]
+            }
+          }
+        },
+        {
+          "name": "4.2c  GET /sensors/TEMP-001  — verify side effect (currentValue = 23.7)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sensors/TEMP-001",
+              "host": ["{{baseUrl}}"],
+              "path": ["sensors", "TEMP-001"]
+            },
+            "description": "After POSTing a reading, the parent Sensor's currentValue should now be 23.7. This demonstrates the cross-resource side effect required by Part 4.2."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Part 5 — Error Handling & Logging (30 marks)",
+      "item": [
+        {
+          "name": "5.1  DELETE /rooms/LIB-301  — room has sensors (expect 409)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/rooms/LIB-301",
+              "host": ["{{baseUrl}}"],
+              "path": ["rooms", "LIB-301"]
+            },
+            "description": "Triggers RoomNotEmptyException → RoomNotEmptyExceptionMapper → HTTP 409 Conflict with a JSON body naming the offending room and sensor count."
+          }
+        },
+        {
+          "name": "5.2  POST /sensors with bad roomId  — expect 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"TEMP-999\",\n  \"type\": \"Temperature\",\n  \"status\": \"ACTIVE\",\n  \"currentValue\": 0,\n  \"roomId\": \"GHOST-000\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sensors",
+              "host": ["{{baseUrl}}"],
+              "path": ["sensors"]
+            },
+            "description": "Triggers LinkedResourceNotFoundException → 422 Unprocessable Entity. The URL is valid and the JSON parses, but the referenced room doesn't exist — semantically wrong rather than syntactically wrong."
+          }
+        },
+        {
+          "name": "5.3  POST reading to OCC-001  — sensor in MAINTENANCE (expect 403)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"value\": 5\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sensors/OCC-001/readings",
+              "host": ["{{baseUrl}}"],
+              "path": ["sensors", "OCC-001", "readings"]
+            },
+            "description": "OCC-001 is seeded with status=MAINTENANCE. The handler throws SensorUnavailableException which is mapped to 403 Forbidden."
+          }
+        },
+        {
+          "name": "5.4  GET /does-not-exist  — global safety net, no stack trace",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/does-not-exist",
+              "host": ["{{baseUrl}}"],
+              "path": ["does-not-exist"]
+            },
+            "description": "Any unmatched / unhandled path still returns a sanitized JSON body via the GlobalExceptionMapper — NEVER a raw Java stack trace. This is the Part 5.4 cybersecurity requirement."
+          }
+        },
+        {
+          "name": "5.5  (Talking point)  — request & response logging",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/rooms",
+              "host": ["{{baseUrl}}"],
+              "path": ["rooms"]
+            },
+            "description": "While recording, switch to the server terminal to show the LoggingFilter output:\n==> GET http://localhost:8080/api/v1/rooms\n<== GET http://localhost:8080/api/v1/rooms -> 200\n\nThe filter implements both ContainerRequestFilter and ContainerResponseFilter and uses java.util.logging.Logger — exactly what Part 5.5 asks for."
+          }
+        }
+      ]
+    }
+  ]
+}
