@@ -177,15 +177,13 @@ curl -s -X DELETE http://localhost:8080/api/v1/rooms/LIB-301 | jq
 
 **Answer:**
 
-By default, JAX-RS treats every resource class as **per-request scoped** — a fresh instance is created for each incoming HTTP request and discarded when the response is sent. This is deliberate: it prevents accidental state leakage between unrelated clients and makes each request independent.
+By default JAX-RS creates a new instance of a resource class for every incoming request. So if I stored rooms and sensors directly as fields on `SensorRoomResource`, that data would be thrown away the moment the request finished. A client could POST a room, get back a 201, and the next GET would come back empty because it'd be handled by a fresh instance of the same class.
 
-The consequence for in-memory state is significant. If I stored rooms or sensors as regular instance fields on `SensorRoomResource`, that data would vanish the moment the request completed, because the resource instance itself is garbage-collected. A client would POST a room, receive 201, and then the next `GET` — handled by a different instance of the same class — would return an empty list.
+To get around this I put all the shared state in a singleton `DataStore` (private static final instance). Every resource grabs the same reference through `DataStore.getInstance()`, so the data survives across requests.
 
-To work around this I centralised all mutable state in a **singleton `DataStore`** (classic singleton pattern via a `private static final` instance). Every resource instance obtains the same shared reference, so state persists across requests.
+The catch with using a singleton is thread safety. Grizzly serves requests from a thread pool, so multiple resource instances can be hitting the store at the same time from different threads. A plain `HashMap` would eventually corrupt under concurrent writes — lost updates, or in older JDKs, infinite loops. So I used `ConcurrentHashMap` for both the rooms and sensors maps. That gives me safe concurrent reads and writes without locking the whole map on every call.
 
-However, singletons introduce a new risk: because Grizzly serves requests on a thread pool, multiple resource instances on different threads can hit the `DataStore` concurrently. A plain `HashMap` would corrupt under concurrent `put` operations (lost updates, infinite loops in older JDKs, or `ConcurrentModificationException` on iteration). I therefore used `ConcurrentHashMap` for both the rooms and sensors collections. Its internal striped-lock design permits safe concurrent reads and writes without serialising the entire map.
-
-Reads of single objects followed by mutations (e.g. "get the room, add a sensor id to its list, put it back") are still technically racy if two threads operate on the same room — but for the scope of this coursework the `ConcurrentHashMap` guarantees, combined with the fact that `ArrayList` inside a single sensor's reading list is only appended to sequentially per-sensor in typical usage, are sufficient. A production-grade version would wrap compound operations in `compute` lambdas or use explicit locks per room.
+It's not completely airtight. If two requests both mutate the same room's sensor list at the same moment I could still end up with a race, because "get the room, add an id, put it back" is a compound operation. For this coursework that's fine, but in a real system I'd probably wrap those compound operations in `compute` lambdas or use explicit per-room locks.
 
 ---
 
@@ -195,17 +193,13 @@ Reads of single objects followed by mutations (e.g. "get the room, add a sensor 
 
 **Answer:**
 
-HATEOAS (Hypermedia As The Engine Of Application State) is the highest level of Roy Fielding's REST maturity model. Instead of clients hard-coding every URL they need, the server embeds navigational links directly in responses — just as a web browser discovers pages by following `<a>` tags rather than being pre-loaded with a sitemap.
+HATEOAS stands for Hypermedia As The Engine Of Application State, and the idea is basically that the server should tell the client where to go next, rather than the client knowing every URL up front. It's the same idea as following links in a web browser — you don't pre-load a sitemap, you just follow whatever anchor tags appear on the page.
 
-Compared to static documentation, this brings several benefits:
+For client developers this is a big deal compared to relying on static documentation. If I ever rename `/sensors` to `/devices` or bump to v2, a client that reads the URLs out of my discovery response keeps working. A client built from a doc PDF breaks and has to be redeployed. It also makes the API easier to explore — a new developer can just hit the root and follow links from there instead of reading a spec cover to cover.
 
-1. **Loose coupling between client and server.** If I move `/api/v1/sensors` to `/api/v2/devices`, a HATEOAS client that reads `resources.sensors` from the discovery endpoint adapts automatically. A client built from static docs breaks and must be redeployed.
-2. **Self-describing APIs.** New developers can explore the API by hitting the root and following links, much like a REST Swagger UI without the tooling. This dramatically reduces onboarding friction.
-3. **State-driven navigation.** Responses can include only the links that are currently valid — e.g. a room response might omit the `delete` link if it still has sensors attached. The server effectively tells the client what it can do next, rather than the client guessing and getting 403/409 errors.
-4. **Versioning and deprecation.** Servers can inject `deprecated` links or alternative URLs to steer clients toward newer endpoints without breaking existing ones.
-5. **Reduced documentation drift.** Static docs rot the moment a developer renames a path. Hypermedia is always in sync with what the server actually serves.
+The other nice thing is that the server can include only the links that are currently valid. A room response could omit its `delete` link while it still has sensors attached, which means the server is effectively telling the client what it's allowed to do next instead of making the client guess and get back a 409. And because the server is the source of truth for its own URLs, there's no chance of documentation rot where the docs say one thing and the code does another.
 
-In my discovery endpoint (`GET /api/v1`) I expose a `resources` map that acts as a lightweight HATEOAS directory — clients learn the paths to `rooms`, `sensors`, and the filtered/nested variants from the server itself.
+In my discovery endpoint at `GET /api/v1` I expose a `resources` map with the paths to rooms, sensors, the filtered sensor view, and the readings sub-resource. It's a lightweight take on HATEOAS but it gets the point across.
 
 ---
 
@@ -215,20 +209,13 @@ In my discovery endpoint (`GET /api/v1`) I expose a `resources` map that acts as
 
 **Answer:**
 
-This is a classic bandwidth-versus-chattiness trade-off.
+This is a trade-off between payload size and number of round trips.
 
-**Returning full objects** (my chosen approach for `GET /rooms`):
-- *Pro:* one round trip gives the client everything it needs to render a list view — no follow-up requests, instant UI.
-- *Pro:* simpler client logic; no loop of `GET /rooms/{id}` calls.
-- *Con:* response size grows linearly with both room count and per-room field count. For thousands of rooms this can be tens or hundreds of KB.
-- *Con:* wasted bytes if the client only needs names or a count.
+If I return full room objects (which is what I went with for `GET /rooms`), the client gets everything it needs in one request and can render a list view immediately. No follow-up calls, no extra code. The downside is that the response grows with both the number of rooms and the number of fields per room, so if the campus had thousands of rooms the payload would start to get heavy, and it's wasteful if the client only cares about room names.
 
-**Returning IDs only:**
-- *Pro:* payload is tiny and constant per-room — ideal for discovery or pagination previews.
-- *Con:* the classic **N+1 problem** — rendering a 100-room list now requires 1 + 100 requests. On mobile or high-latency networks this is punishing.
-- *Con:* the client becomes responsible for stitching data together, increasing code complexity.
+If I returned only IDs, the payload per room would be tiny and constant. But then every row in the list view would need its own `GET /rooms/{id}` to actually show anything useful. That's the classic N+1 problem — one list call plus N detail calls — and on mobile or a slow network it's painful. The client also becomes responsible for stitching all those responses back together.
 
-The pragmatic answer for most campus-scale APIs is what I implemented: **return full objects but keep them small** (no deeply nested reading lists in the rooms collection response, for example). For larger systems the standard escape hatches are **pagination** (`?page=1&size=20`), **field selection** (`?fields=id,name`), and **link expansion** (`?expand=sensors`) — all of which preserve the one-round-trip ergonomics while controlling payload size.
+For a campus-scale API with a few dozen rooms, returning full objects is fine and that's what I did. For a much bigger system the usual way out is pagination with something like `?page=1&size=20`, combined with optional field selection (`?fields=id,name`) for cases where the client only wants a subset. That keeps the one-round-trip ergonomics without letting the responses blow up.
 
 ---
 
@@ -238,19 +225,13 @@ The pragmatic answer for most campus-scale APIs is what I implemented: **return 
 
 **Answer:**
 
-**Yes, my DELETE implementation is idempotent** — the server ends up in the same state regardless of how many times the request is repeated, which is the definition of idempotency in HTTP (RFC 9110).
+Yes, my DELETE is idempotent. Idempotency is about whether the server ends up in the same state after one call versus many, not whether the response code is the same every time. That's the RFC 9110 definition.
 
-Walking through a repeated `DELETE /rooms/ENG-204` for an empty room:
+Walking through it: if I delete `ENG-204` and the room has no sensors, the handler removes it from the store and returns 204. If the client sends the same DELETE again, the room is already gone, so I return 404. Third call, fourth, hundredth — same 404, room still absent. The response code changes between the first and subsequent calls but the actual state on the server is identical from the second call onwards.
 
-- **First call:** the room exists and has no sensors → `store.getRooms().remove(roomId)` → `204 No Content`. State: room is gone.
-- **Second call:** the room no longer exists → my handler returns `404 Not Found`. State: room is still gone.
-- **Third, fourth, nth call:** same as the second — `404`. State: still gone.
+The case where the room has sensors works the same way. First DELETE throws `RoomNotEmptyException` and returns 409, room stays. Second DELETE throws the same exception, returns 409, room still there. The end state never changes no matter how many times the client retries — the operation just never succeeds.
 
-The *response status code* differs between the first and subsequent calls (204 vs 404), but idempotency is about **end state on the server**, not response equivalence. After one call or one hundred, the room `ENG-204` is absent from the store. No additional side effects occur. This is contrast to, say, a naive counter-increment endpoint which would be non-idempotent because each call changes state.
-
-There's a subtle wrinkle with the `RoomNotEmptyException` case. If a room has sensors, the first DELETE returns 409 and the room remains. A repeated DELETE also returns 409 and the room still remains. The end state is unchanged across attempts, so idempotency still holds — the operation simply never succeeds.
-
-Some teams argue that all DELETEs should return 204 even for absent resources, to make the client's error handling simpler. I chose to return 404 because it gives the client useful information (the resource wasn't there) without violating idempotency. Both conventions are defensible.
+Some APIs choose to return 204 every time regardless of whether the resource actually existed, on the grounds that it makes client error handling simpler. I went with 404 because it gives the client a useful signal (that the resource wasn't there) without breaking the idempotency property. Both conventions are defensible — it's a style call.
 
 ---
 
@@ -260,21 +241,11 @@ Some teams argue that all DELETEs should return 204 even for absent resources, t
 
 **Answer:**
 
-`@Consumes(MediaType.APPLICATION_JSON)` is part of JAX-RS's request dispatching machinery. It tells the runtime: "this method will only accept requests whose `Content-Type` header is `application/json`."
+`@Consumes(MediaType.APPLICATION_JSON)` is really a routing hint for Jersey. It tells the framework "this method only accepts requests whose Content-Type is application/json." When a request comes in, Jersey looks at the URL and the HTTP verb to find candidate methods, and then filters those candidates by matching their `@Consumes` against the Content-Type header on the request.
 
-When a client POSTs with a mismatching header — say `Content-Type: application/xml` or `text/plain` — JAX-RS does the matching *before* ever invoking my method. The process is roughly:
+If none of the candidates match, Jersey shortcircuits the whole dispatch and returns 415 Unsupported Media Type on its own. My method body never runs. The practical win is that I don't have to write defensive checks like `if (contentType.equals("application/json"))` inside the handler. The framework handles that at the protocol boundary before my code is even reached.
 
-1. JAX-RS resolves the URL to the candidate resource methods (those whose `@Path` and HTTP method match).
-2. It filters those candidates against the request's `Content-Type` using each method's `@Consumes`.
-3. If no method matches, JAX-RS short-circuits the dispatch and returns **HTTP 415 Unsupported Media Type** automatically. My method body never runs.
-
-The important implication is that validation happens at the protocol boundary — I don't need defensive `if (contentType.equals(...))` checks inside my handler. The framework protects the method.
-
-A separate but related concern is parseability. Even if the header says `application/json`, if the body is actually garbage like `not-json-at-all`, Jackson (the JSON provider) will fail to deserialise and Jersey returns **HTTP 400 Bad Request**. So the two failure modes are distinct:
-- Wrong `Content-Type` header → 415 (framework-level, before dispatch).
-- Correct header, malformed body → 400 (deserialiser-level).
-
-This layered defense keeps resource code clean and makes the API's contract explicit to clients.
+There's a separate failure mode worth flagging though. If the header says `application/json` but the body is actually garbage — say `not-json-at-all` — Jackson fails to deserialize it and Jersey returns 400 Bad Request instead. So the two errors are cleanly separated: wrong Content-Type is a 415 (framework level, before dispatch), malformed body is a 400 (parser level, still before my handler runs). Between them you get a clear contract for clients without any boilerplate inside the resource methods.
 
 ---
 
@@ -284,19 +255,15 @@ This layered defense keeps resource code clean and makes the API's contract expl
 
 **Answer:**
 
-Both designs work, but the query-parameter approach aligns better with REST's resource-oriented principles.
+Both designs work but the query-parameter version fits REST better.
 
-The fundamental issue is **what the URL identifies**. In REST, a URL names a *resource*. `/sensors` is the collection of all sensors — a single, well-defined resource. A filter doesn't change what resource is being addressed; it changes which representation of that collection is returned. Query parameters are the idiomatic way to express "give me a view of this resource."
+The way I think about it: a URL should name a resource. `/sensors` is the collection of all sensors, full stop. Filtering doesn't change what resource I'm asking about, it just changes which representation I want back. That's exactly what query strings are for.
 
-Specific advantages of `@QueryParam`:
+Practically, `@QueryParam` also composes. `GET /sensors?type=CO2&status=ACTIVE&roomId=LIB-301` reads naturally and scales. Doing the same thing with path segments would give you something like `/sensors/type/CO2/status/ACTIVE/room/LIB-301`, which is awkward and has an obvious combinatorial explosion problem — every new filter doubles the number of routes you'd have to think about.
 
-1. **Composability.** `GET /sensors?type=CO2&status=ACTIVE&roomId=LIB-301` scales naturally. The path-based alternative would explode into combinatorial routes like `/sensors/type/CO2/status/ACTIVE/room/LIB-301`, which is brittle and unmaintainable.
-2. **Optionality.** Query parameters are optional by nature. `/sensors` and `/sensors?type=CO2` both make sense. In the path-based design, `/sensors` and `/sensors/type/CO2` look like different resources rather than the same collection under different filters.
-3. **Caching semantics.** Intermediate caches understand that `/sensors` and `/sensors?type=CO2` are different cacheable representations of the same underlying collection. Path-based variants are treated as genuinely separate resources.
-4. **Discoverability and convention.** Every major REST API (GitHub, Stripe, Twilio) uses query parameters for filtering. Developers recognise the pattern instantly.
-5. **Separation of identity and modification.** Paths identify; query strings modify. Mixing filtering into the path muddles this separation and often leads to ambiguous routes ("is `type` a sub-resource or a filter keyword?").
+Query params are also optional by nature. `/sensors` and `/sensors?type=CO2` are clearly the same collection viewed two ways. With a path-based design, `/sensors` and `/sensors/type/CO2` start looking like two different resources, which they really aren't. There's also a convention argument — pretty much every major REST API out there (GitHub, Stripe, and so on) filters with query params, so developers recognise the pattern immediately.
 
-Path parameters belong in the URL when the value is part of the resource's **identity** — `/rooms/LIB-301` identifies a specific room — not when it's a filter criterion applied to a collection.
+Path parameters belong in a URL when the value is part of the resource's identity — `/rooms/LIB-301` names one specific room. They don't belong there when the value is just a filter on a collection.
 
 ---
 
@@ -306,19 +273,15 @@ Path parameters belong in the URL when the value is part of the resource's **ide
 
 **Answer:**
 
-The sub-resource locator pattern is JAX-RS's mechanism for expressing resource *containment* — a sensor "has" readings, so `/sensors/{id}/readings` is naturally handled by a `SensorReadingResource` rather than by cramming another half-dozen methods into `SensorResource`.
+The sub-resource locator pattern is JAX-RS's way of letting you split a nested URL structure across multiple classes. A sensor "has" readings, so `/sensors/{id}/readings` is naturally handled by its own `SensorReadingResource` instead of being stuffed into `SensorResource` alongside the sensor CRUD methods.
 
-Concretely, my `SensorResource.getReadingsSubResource(sensorId)` has no `@GET` or `@POST` annotation. That's the signal to JAX-RS: this method doesn't serve an HTTP verb directly — instead it *returns another resource object* that JAX-RS continues dispatching against using the remaining URL path. The parent resource essentially delegates the rest of the routing to a child class.
+Here's how it works in the code. My `SensorResource.getReadingsSubResource(sensorId)` method doesn't have a `@GET` or `@POST` annotation — that's the signal to JAX-RS that it's a locator, not an endpoint. Instead of returning a response, it returns an instance of another resource class, and JAX-RS continues dispatching against that instance using the rest of the URL path.
 
-Architectural benefits:
+The main benefit is keeping each class focused on one thing. `SensorResource` only knows about sensors, `SensorReadingResource` only knows about readings, and neither has to care about the other beyond a constructor argument. Both classes stay small and readable. I'm also passing the parent `Sensor` directly into the sub-resource constructor, so the sub-resource doesn't have to redo the lookup or repeat the "find it or 404" boilerplate on every call — it's already scoped to its parent.
 
-1. **Single Responsibility Principle.** `SensorResource` handles sensor CRUD. `SensorReadingResource` handles reading CRUD. Neither class knows about the other's internals beyond a constructor argument. This is the same reasoning behind splitting a monolithic `UserController` into `UserController`, `UserAddressController`, `UserOrderController`, etc.
-2. **Shared parent context.** My locator passes the parent `Sensor` object directly into the sub-resource's constructor. The sub-resource never has to re-look-up the sensor on every request — it's already scoped to its parent. This eliminates repetitive "find the sensor or 404" boilerplate inside each reading method.
-3. **Security and validation choke-points.** Because every reading operation must go through the locator, I have a single place to enforce parent-level rules (existence of the sensor, for example). If I later add authorization — "you can only view readings for sensors you own" — that check lives in one method, not five.
-4. **Testability.** `SensorReadingResource` can be unit-tested by instantiating it with a mock `Sensor`. There's no need to spin up the whole JAX-RS container or mock the data store — the dependency is explicit in the constructor.
-5. **Scalability for large APIs.** Imagine extending the Smart Campus to `/sensors/{id}/readings/{rid}/annotations/{aid}/attachments/{atid}` — without sub-resource locators, this logic would live in one gigantic class. With them, each level delegates to its own class, mirroring the URL hierarchy as a class hierarchy.
+It also gives you one natural place to enforce parent-level rules. Every reading operation has to go through the locator, so if I later added authorization ("you can only read your own sensor's history") that check would live in one method and automatically cover everything downstream.
 
-The pattern trades a small amount of upfront complexity (you need two classes) for a large long-term payoff in maintainability, which is exactly the trade-off mature codebases make.
+Scaling this up is where the pattern really earns its keep. If the campus ever needed `/sensors/{id}/readings/{rid}/annotations/{aid}`, each level could keep its own class rather than one giant controller handling every depth of nesting. The class hierarchy ends up mirroring the URL hierarchy, which is usually what you want in an API this structured.
 
 ---
 
@@ -328,17 +291,17 @@ The pattern trades a small amount of upfront complexity (you need two classes) f
 
 **Answer:**
 
-The two status codes answer different questions.
+404 and 422 answer different questions.
 
-**404 Not Found** means "the resource *identified by this URL* does not exist." It's about the request target. When a client requests `GET /rooms/GHOST-000`, the URL itself points to something absent, and 404 is exactly right.
+404 means "the resource you asked for doesn't exist" — it's about the URL. If a client hits `GET /rooms/GHOST-000`, the URL itself is pointing at nothing, and 404 is the right answer.
 
-**422 Unprocessable Entity** (RFC 4918) means "I understood your request syntax, I could parse your payload, but I can't process it because it's semantically wrong." The URL is fine, the JSON is well-formed, the fields have the right types — but a business rule fails.
+422 means "I understood your request and the JSON parsed fine, but I can't process the content because something about it is semantically wrong." It's about the payload, not the URL.
 
-In my case: `POST /sensors` with body `{"roomId": "GHOST-000", ...}`. The target URL `/sensors` exists. The body is valid JSON. The `roomId` field is a valid string. Nothing is technically "not found" at the URL level — `/sensors` is absolutely there. What fails is a referential integrity check buried inside the payload. Returning 404 in this situation is misleading because a naive client might think the `/sensors` endpoint itself is missing, retry at different URLs, or log an incorrect diagnosis.
+My case is the second one. The client POSTs to `/sensors` with a body like `{"roomId": "GHOST-000", ...}`. The URL `/sensors` is absolutely there. The JSON is valid. Every field has the right type. The only thing wrong is that the `roomId` points at a room that doesn't exist. Returning 404 here would be misleading — a naive client might assume the `/sensors` endpoint itself is gone and start retrying different URLs, or log the wrong kind of error.
 
-422 communicates exactly the right thing: "your payload parsed fine but contains a reference to a room that doesn't exist." Combined with a JSON error body that names the missing resource (`missingResource.type: "Room"`, `missingResource.id: "GHOST-000"`), the client gets actionable feedback.
+422 says exactly what's wrong: the payload looks fine syntactically but fails a semantic check. I also return the missing resource's type and ID in the error body (`missingResource.type: "Room"`, `missingResource.id: "GHOST-000"`) so the client knows what to fix.
 
-Some APIs use **400 Bad Request** for this case. 400 is acceptable but broader — it covers both syntactic failures (malformed JSON) and semantic ones (bad references). 422 draws the distinction more precisely, which is why modern APIs like GitHub and Stripe prefer it for semantic validation failures.
+Some APIs use 400 Bad Request for this and that's also fine — 400 is just broader, since it covers both malformed JSON and bad references. 422 is more specific, which is why it tends to show up in well-designed APIs for exactly this situation.
 
 ---
 
@@ -348,19 +311,17 @@ Some APIs use **400 Bad Request** for this case. 400 is acceptable but broader �
 
 **Answer:**
 
-A Java stack trace is a dense dossier on the inner workings of an application. Exposing one to an unauthenticated client is the kind of small mistake that accelerates a breach, because it leaks information attackers otherwise have to pay for in time and probes.
+A Java stack trace is basically a free intelligence report about your application. Leaking one to unauthenticated clients is a small mistake with disproportionate consequences because it hands attackers information they'd otherwise have to spend real time probing for.
 
-Specific things an attacker can learn from a single stack trace:
+A few concrete things you can learn from a single trace:
 
-1. **Framework and library versions.** Lines like `org.glassfish.jersey.server.ServerRuntime$2.run` reveal the JAX-RS implementation and — combined with behaviour — often its version. An attacker cross-references this against public CVE databases. If your Jersey is the version vulnerable to CVE-XXXX-YYYY, they now know which exploit to try.
-2. **Application package structure.** `com.westminster.smartcampus.resources.SensorRoomResource.deleteRoom(SensorRoomResource.java:57)` tells the attacker the internal class hierarchy, the naming conventions, and the line number where the failure occurred. This is a free map of the codebase.
-3. **Database and persistence details.** If the stack trace contains `org.hibernate.exception.ConstraintViolationException` or `java.sql.SQLSyntaxErrorException: Table 'users' doesn't exist`, the attacker learns the ORM, the DB engine, and sometimes the table names — all data the reconnaissance phase of an attack normally has to guess.
-4. **Filesystem paths.** `at com.acme.Config.<init>(/opt/acme-prod/conf/Config.java)` leaks deployment paths, which can be combined with path traversal or local file inclusion attempts.
-5. **Business logic hints.** Variable names and method names in the trace (`validateOwnership`, `isAdminOverride`) hint at security-sensitive code paths worth probing.
-6. **Presence of debug/dev code in production.** Traces often reveal debug filters, mocked services, or internal health endpoints the attacker shouldn't know about.
-7. **Fingerprinting for targeted attacks.** A trace is a unique fingerprint. Attackers can correlate it across known leaks ("this is the same Jersey 2.41 + Jackson 2.15 stack seen in X exploit").
+- Library versions. Lines like `org.glassfish.jersey.server.ServerRuntime$2.run` reveal the JAX-RS implementation, and combined with behaviour that usually narrows the exact version down. Cross-reference that against public CVE databases and you've got a ready-made list of known exploits to try.
+- Application structure. `com.westminster.smartcampus.resources.SensorRoomResource.deleteRoom(SensorRoomResource.java:57)` tells you the package layout, the class names, the method names, and the exact line number of the failure. That's a free map of the codebase.
+- Persistence layer. If the trace includes `org.hibernate.ConstraintViolationException` or something like `SQLSyntaxErrorException: Table 'users' doesn't exist`, you know the ORM, the database engine, and sometimes even table names.
+- Filesystem paths. Something like `at com.acme.Config.<init>(/opt/acme-prod/conf/Config.java)` leaks deployment paths, which plays into path-traversal or local-file-inclusion attempts.
+- Fingerprinting. A particular stack is a unique signature — attackers can correlate it against other known leaks running the same stack.
 
-The OWASP cheat sheet for error handling treats stack-trace leakage as an **Information Disclosure** vulnerability (CWE-209) for exactly these reasons. My `GlobalExceptionMapper` logs the full trace server-side (so developers can still diagnose production issues) but returns a sanitised generic message to the caller. That's the best-of-both-worlds approach: observability for operators, opacity for attackers.
+OWASP classifies this as Information Disclosure (CWE-209) for these reasons. My `GlobalExceptionMapper` still logs the full trace server-side so I can debug problems in production, but it returns a sanitised, generic message to the caller. Operators keep the observability they need, attackers get nothing useful.
 
 ---
 
@@ -370,16 +331,17 @@ The OWASP cheat sheet for error handling treats stack-trace leakage as an **Info
 
 **Answer:**
 
-Logging is a textbook **cross-cutting concern** — it applies uniformly across many methods but isn't part of any of their core business logic. Manually scattering `LOGGER.info("request for ...")` inside every resource method is the hand-rolled alternative, and it's bad for several compounding reasons:
+Logging is the textbook example of a cross-cutting concern — it applies to every endpoint but isn't really part of any single endpoint's actual job. The alternative to using a filter is scattering `LOGGER.info(...)` calls manually inside every method, and that's a bad idea for a few reasons.
 
-1. **DRY violation and copy-paste drift.** If you copy the same log line into 30 methods, you're guaranteed to end up with inconsistencies — someone logs the URI, someone else logs the method, someone forgets to log the status. A single filter produces identical, uniform output across every endpoint.
-2. **Coupling business logic to infrastructure.** A resource method's job is to handle a sensor, not to decide how observability works. Mixing the two makes the resource harder to read and harder to test. Filters keep logging *outside* the method, leaving the resource focused on its domain.
-3. **Complete coverage for free.** A filter runs for every request, including ones that never reach a resource method — for example, 404s from unmatched paths, or 415s from `@Consumes` mismatches, or exceptions thrown during deserialization. Inline logging misses all of these because the method is never entered.
-4. **Separation of request vs response timing.** `ContainerResponseFilter` runs *after* the method completes, so it can log the final status code — something the resource method can't easily know, since it returns a `Response` object whose final status isn't necessarily fixed until post-processing completes.
-5. **Centralized configuration.** Want to turn logging off in production? Change the log level in one place. Want to add request-id correlation? Do it in the filter and every endpoint automatically gets it. With inline logging, changes ripple across dozens of files.
-6. **Composable cross-cutting concerns.** Filters chain. The same mechanism that powers logging also powers authentication, rate limiting, request tracing, CORS, and content negotiation. Learning the pattern once pays dividends across many concerns.
+First, it breaks DRY. If I copied the same log line into thirty methods I'd inevitably end up with thirty slightly different versions — someone logs the URI, someone else logs the method, someone forgets the status code. A single filter produces identical, consistent output for every request.
 
-This is the same reasoning behind servlet filters, Spring interceptors, Express middleware, and aspect-oriented programming. Cross-cutting concerns belong in cross-cutting infrastructure, not in the code that does domain work.
+Second, it mixes infrastructure into business logic. A resource method's job is to handle a sensor, not to decide how logging works. Pulling logging out into a filter keeps those concerns separate and the resource code stays focused on the thing it actually does.
+
+The bigger practical win is that filters get total coverage for free. A filter runs for every single request, including ones that never reach a resource method at all — 404s for unmatched paths, 415s from `@Consumes` rejections, errors thrown during deserialization before the method runs. Inline logging misses all of those because the method is never entered.
+
+There's also a timing thing worth mentioning. `ContainerResponseFilter` runs after the response is finalised, so it can log the actual status code that went out. A resource method returning a `Response` object doesn't necessarily know the final status yet — another filter or an exception mapper might still modify it.
+
+And finally, changing the logging behaviour across the whole API is one line in the filter. With inline logging you'd be editing dozens of methods. The same mechanism also powers authentication, rate limiting, and request tracing, so it's a pattern worth learning once and reusing everywhere.
 
 ---
 
