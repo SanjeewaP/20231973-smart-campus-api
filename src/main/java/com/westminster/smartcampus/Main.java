@@ -4,6 +4,7 @@ import org.glassfish.grizzly.http.server.HttpServer;
 import org.glassfish.jersey.grizzly2.httpserver.GrizzlyHttpServerFactory;
 import org.glassfish.jersey.server.ResourceConfig;
 
+import java.io.IOException;
 import java.net.URI;
 import java.util.logging.Logger;
 
@@ -24,18 +25,22 @@ public class Main {
         );
 
         LOGGER.info("Smart Campus API started at " + BASE_URI);
-        LOGGER.info("Press Ctrl+C to stop the server.");
+        LOGGER.info("Press ENTER to stop the server.");
 
-        // Keep the JVM alive until interrupted
+        // Also shut down cleanly if the JVM is killed (e.g. NetBeans Stop button).
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             LOGGER.info("Shutting down Smart Campus API...");
             server.shutdownNow();
         }));
 
+        // Block until the user hits Enter.
         try {
-            Thread.currentThread().join();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            System.in.read();
+        } catch (IOException e) {
+            LOGGER.warning("Input stream closed; shutting down.");
         }
+
+        LOGGER.info("Stopping server...");
+        server.shutdownNow();
     }
 }
