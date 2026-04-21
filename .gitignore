@@ -27,3 +27,6 @@ Thumbs.db
 # Java
 *.class
 hs_err_pid*
+
+# Misc
+.claude/
