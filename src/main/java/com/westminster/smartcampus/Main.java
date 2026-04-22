@@ -27,7 +27,7 @@ public class Main {
         LOGGER.info("Smart Campus API started at " + BASE_URI);
         LOGGER.info("Press ENTER to stop the server.");
 
-        // Also shut down cleanly if the JVM is killed (e.g. NetBeans Stop button).
+        // Also shut down cleanly if the JVM is killed 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             LOGGER.info("Shutting down Smart Campus API...");
             server.shutdownNow();

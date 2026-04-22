@@ -97,9 +97,11 @@ The server starts on **`http://localhost:8080`** and the API is rooted at **`htt
 
 You should see:
 ```
-INFO: Smart Campus API started at http://localhost:8080/api/v1
-INFO: Press Ctrl+C to stop the server.
+INFO: Smart Campus API started at http://localhost:8080/api/v1/
+INFO: Press ENTER to stop the server.
 ```
+
+Press **Enter** in the terminal (or click the Stop button in NetBeans) to shut the server down cleanly.
 
 The in-memory store is pre-seeded with two rooms (`LIB-301`, `CS-101`) and three sensors (`TEMP-001`, `CO2-001`, `OCC-001`) so you can test immediately.
 
